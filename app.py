@@ -6,7 +6,7 @@ from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 from services.translation import translate_text, calculate_correlation, evaluate_native_quality
 import traceback
-
+from pymongo import MongoClient
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +32,9 @@ last_translation = {
     'adjusted_scores': None,
     'timestamp': None
 }
+client = MongoClient("mongodb+srv://stark:Murali123@cluster0.qq2ou.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
+db = client['Translation_Samples']
+collection = db['Few_shot_samples']
 
 @app.route('/')
 def index():
@@ -77,6 +80,7 @@ def translate():
             input_text, 
             input_language, 
             output_language,
+            collection,
             priority
         )
         logger.info(f"Translation completed - Result length: {len(translated_text)} chars")

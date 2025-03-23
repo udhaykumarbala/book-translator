@@ -7,6 +7,8 @@ from typing import Dict, Any, Tuple
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+import anthropic
+import openai
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -14,7 +16,7 @@ logger = logging.getLogger(__name__)
 # LLM Providers
 from .llm_providers import get_openai_translation, get_anthropic_translation, perform_two_stage_translation, perform_three_stage_translation
 
-def translate_text(input_text: str, input_language: str, output_language: str, priority: int = 50) -> str:
+def translate_text(input_text: str, input_language: str, output_language: str, collection, priority: int = 50) -> str:
     """
     Translate text using the configured LLM provider while preserving story essence.
     
@@ -39,7 +41,9 @@ def translate_text(input_text: str, input_language: str, output_language: str, p
             text=input_text,
             source_lang=input_language,
             target_lang=output_language,
-            priority=priority
+            priority=priority,
+            provider=provider,
+            collection=collection
         )
         logger.info(f"Enhanced translation completed in {time.time() - start_time:.2f} seconds")
         return result
@@ -391,7 +395,9 @@ def evaluate_native_quality(translated_text: str, output_language: str) -> dict:
             f"3. Native Fluency Estimate (how fluent it seems to native speakers): 0-100\n"
             f"4. Common Phrase Usage (how well it uses common native phrases): 0-100\n"
             f"5. Overall Native Quality (overall score for native authenticity): 0-100\n\n"
-            f"Provide your evaluation as a JSON object with these keys."
+            f"Provide your evaluation as a JSON object with these keys.\n"
+            f"Do not add extra content / explanation in the output. Provide only the JSON result.\n"
+            '{"idiomaticity_score","cultural_reference_count","native_fluency_estimate","common_phrase_usage","overall_native_quality"}'
         )
         
         user_prompt = f"Text to evaluate: {translated_text[:2000]}..."  # Limit text length
@@ -400,6 +406,8 @@ def evaluate_native_quality(translated_text: str, output_language: str) -> dict:
         provider = os.getenv('LLM_PROVIDER', 'openai').lower()
         
         if provider == 'openai':
+            openai_api_key = os.getenv('OPENAI_API_KEY')
+            client = openai.OpenAI(api_key=openai_api_key)
             response = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
@@ -412,6 +420,7 @@ def evaluate_native_quality(translated_text: str, output_language: str) -> dict:
             
             result = response.choices[0].message.content.strip()
         elif provider == 'anthropic':
+            anthropic_api_key = os.getenv('ANTHROPIC_API_KEY')
             client = anthropic.Anthropic(api_key=anthropic_api_key)
             response = client.messages.create(
                 model="claude-3-sonnet-20240229",
@@ -485,3 +494,172 @@ def evaluate_native_quality(translated_text: str, output_language: str) -> dict:
         metrics["common_phrase_usage"] = 70.0
         metrics["overall_native_quality"] = 70.0  # Reasonable default
         return metrics 
+    
+
+def enhanced_translation_pipeline(text,source_lang,target_lang,priority,provider,collection):
+    #find the genre 
+    genre = find_genre(text,source_lang,provider) 
+    start_time = time.time()
+
+    if target_lang.lower() in ['ta','tam','tamil']:
+        target_lang = 'tamil'
+    elif target_lang.lower() in ['hi','hin','hindi']:
+        target_lang = 'hindi'
+    elif target_lang.lower() in ['ma','mar','marathi']:
+        target_lang = 'marathi'
+    else:
+        logger.info(f"Target language: {target_lang} not supported for enhanced translation")
+        return "Target language not supported for enhanced translation"
+
+    #get samples from mongo db
+    few_shot_sample = collection.find_one({"language": target_lang.lower(), "genre": genre.lower()})
+    input_example = few_shot_sample['input']
+    output_example = few_shot_sample['output'] 
+    if genre.lower() == 'philosophy':
+        genre = 'philosophical'
+    #stage 1 few shot translation
+    system_prompt = (
+            f"Your task is to translate the following texts so that they read like authentic {target_lang} {genre} work"
+            f"Your translations should feel as if they were originally written in {target_lang}. To achieve this: "
+            f"Emphasize Authenticity: Use rich {target_lang} idioms, traditional expressions, and culturally resonant references "
+            f"Adapt Expression: Reframe sentences to match the natural flow and expression patterns of {target_lang}."
+            f"Preserve Meaning: While adapting, ensure that the core meaning of the original text is fully preserved."
+            f"Cultural elements from the source language should generally be maintained with explanations if needed.\n"
+            f"Provide only the translation without any additional introductory text" # to avoid llm introductory text
+        )
+    user_prompt = (
+        f"Reference Sample:\n"
+        f"original text:{input_example}\n"
+        f"tranlsated text:{output_example}\n"
+        f"Below is a new text that needs to be translated into {target_lang}. Make sure to follow the needed guidelines and produce a high-quality translation.\n"
+        f"{text}"
+    )
+    try:
+        if provider == 'openai':
+            result = get_openai_translation(system_prompt,user_prompt)      
+        elif provider == 'anthropic':
+            result = get_anthropic_translation(system_prompt,user_prompt)
+        else:
+            logger.error(f"Unsupported LLM provider for enhanced translation: {provider}")
+            raise ValueError(f"Unsupported LLM provider for enhanced translation: {provider}")
+        
+        logger.info(f"Enhanced translation completed in {time.time() - start_time:.2f} seconds")
+
+        logger.info(f"Result length: {len(result)} characters")
+
+    except Exception as e:
+        logger.error(f"Enhanced translation error: {str(e)}", exc_info=True)
+        raise
+
+    if priority <= 70:
+        return result
+    
+    #stage 2 authentic transformation 
+    system_prompt_2 = (
+        f"You are a professional native {target_lang} author with exceptional writing skills.\n"
+        f"Your task is to polish the following text for {target_lang} readers.\n "
+        f"Review and refine the following {target_lang} translation to make it read like authentic {target_lang} {genre} work.\n"
+        f"Use rich {target_lang} idioms, expressions, and cultural references extensively.\n"
+        f"Prioritize creating text that feels completely authentic to the target language."
+        f"Pay special attention to:" 
+        f"1. Preserving all factual content and key concepts "
+        f"2. Maintaining the original structure and flow "
+        f"3. Using appropriate {target_lang} literary devices and vocabulary\n"
+        f"Provide only the refined text without any additional introductory text" # to avoid llm introductory text
+    )
+    user_prompt_2 = (
+        f"Here is the translation that needs to be polished for {target_lang} readers.\n"
+        f"{result}"
+    )
+    try:
+        if provider == 'openai':
+            final_result = get_openai_translation(system_prompt_2,user_prompt_2)      
+        elif provider == 'anthropic':
+            final_result = get_anthropic_translation(system_prompt_2,user_prompt_2)
+        else:
+            logger.error(f"Unsupported LLM provider for enhanced translation: {provider}")
+            raise ValueError(f"Unsupported LLM provider for enhanced translation: {provider}")
+        
+        logger.info(f"Enhanced translation completed in {time.time() - start_time:.2f} seconds")
+
+        logger.info(f"Result length: {len(result)} characters")
+        return final_result
+    
+    except Exception as e:
+        logger.error(f"Enhanced translation error: {str(e)}", exc_info=True)
+        raise
+
+def find_genre(input_text,source_lang,provider):
+    input_snippet = input_text[:600] 
+    logger.info(f"Finding genre for {source_lang} text")
+    
+    try:
+        system_prompt = (
+            f"You are a language expert in {source_lang} language "
+            f"Classify the given content to suitable genre type as defined here.\n"
+            f"1. Literature\n"
+            f"2. Philosophy \n"
+            f"3. Novel\n"
+            f"4. Fiction\n"
+            f"5. NonFiction\n"
+            f"6. Poetry\n"
+            f'Provide your classification as a JSON object defined here: {{"genre": "genre type"}}'
+            f"Do not add extra content / explanation in the output. Provide only the json result.\n"
+            f"Make sure the output genre type is from the above defined types.\n"
+        )
+        
+        user_prompt = f"Input content to classify: {input_snippet}"
+        
+        logger.info("Calling LLM for genre classification")
+        
+        if provider == 'openai':
+            openai_api_key = os.getenv('OPENAI_API_KEY')
+            client = openai.OpenAI(api_key=openai_api_key)
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                response_format={"type": "json_object"}
+            )
+            
+            result = response.choices[0].message.content.strip()
+        elif provider == 'anthropic':
+            anthropic_api_key = os.getenv('ANTHROPIC_API_KEY')
+            client = anthropic.Anthropic(api_key=anthropic_api_key)
+            response = client.messages.create(
+                model="claude-3-sonnet-20240229",
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+                temperature=0.3,
+                max_tokens=1000
+            )
+            
+            result = response.content[0].text
+        else:
+            raise ValueError(f"Unsupported LLM provider: {provider}")
+            
+        logger.info("Parsing genre classification results")
+        try:
+            # Clean the response if it's not pure JSON
+            result = result.strip()
+            if result.startswith('```json'):
+                result = result.split('```json')[1].split('```')[0].strip()
+            elif result.startswith('```'):
+                result = result.split('```')[1].split('```')[0].strip()
+                
+            genre_class = json.loads(result)                     
+            return genre_class['genre']      
+        except Exception as parse_error:
+            logger.error(f"Error parsing genre classification: {str(parse_error)}", exc_info=True)
+            # Return default values
+            logger.warning("Using default genre type")
+            return "Literature" #default genre type
+            
+    except Exception as eval_error:
+        logger.error(f"Erro calling llm for genre classification {str(eval_error)}", exc_info=True)
+        # Return default values
+        logger.warning("Using default genre type")
+        return "Literature" #default genre type

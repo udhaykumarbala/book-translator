@@ -144,13 +144,12 @@ def perform_two_stage_translation(system_prompt_stage1: str, system_prompt_stage
     """
     start_time = time.time()
     logger.info(f"Starting two-stage translation with provider: {provider}")
-    
     try:
         # Stage 1: Initial translation with focus on semantic preservation
         logger.info("Starting stage 1 translation (semantic preservation)")
         stage1_start = time.time()
         
-        if provider == 'openai':
+        if provider.strip() == "openai":
             stage1_translation = get_openai_translation(system_prompt_stage1, input_text)
         elif provider == 'anthropic':
             stage1_translation = get_anthropic_translation(system_prompt_stage1, input_text)
@@ -173,7 +172,7 @@ def perform_two_stage_translation(system_prompt_stage1: str, system_prompt_stage
         logger.info("Starting stage 2 translation (refinement)")
         stage2_start = time.time()
         
-        if provider == 'openai':
+        if provider == "openai":
             stage2_translation = get_openai_translation(system_prompt_stage2, stage2_user_prompt)
         elif provider == 'anthropic':
             stage2_translation = get_anthropic_translation(system_prompt_stage2, stage2_user_prompt)
@@ -221,7 +220,6 @@ def perform_three_stage_translation(system_prompt_stage1: str, system_prompt_sta
         # Stage 1: Initial translation with focus on semantic preservation
         logger.info("Starting stage 1 translation (semantic preservation)")
         stage1_start = time.time()
-        
         if provider == 'openai':
             stage1_translation = get_openai_translation(system_prompt_stage1, input_text)
         elif provider == 'anthropic':
@@ -274,8 +272,7 @@ def perform_three_stage_translation(system_prompt_stage1: str, system_prompt_sta
         
         logger.info(f"Stage 3 translation completed in {time.time() - stage3_start:.2f} seconds")
         logger.info(f"Stage 3 result length: {len(stage3_translation)} characters")
-        logger.info(f"Total three-stage translation time: {time.time() - start_time:.2f} seconds")
-            
+        logger.info(f"Total three-stage translation time: {time.time() - start_time:.2f} seconds")     
         return stage3_translation
     except Exception as e:
         logger.error(f"Three-stage translation Error: {str(e)}", exc_info=True)
